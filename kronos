@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "${KRONOS_DEBUG:-0}" != "0" ]; then set -x; fi
+
+YELLOW=$'\033[33m'
+NC=$'\033[0m'
+
+PARTS=""
+SIZE_MODE="${CHUNK_SIZE:-}"
+TRANSFERS="${TRANSFERS:-8}"
+CHECKERS="${CHECKERS:-8}"
+THRESHOLD="${THRESHOLD:-1G}"
+PORT="22"
+PORT_EXPLICIT=0
+SIZE_EXPLICIT=0
+PARTS_EXPLICIT=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --parts)
+            PARTS_EXPLICIT=1
+            if [[ "${2:-}" =~ ^[0-9]+$ ]]; then
+                PARTS="$2"
+                shift 2
+            else
+                PARTS="8"
+                shift 1
+            fi
+            ;;
+        --size)  SIZE_MODE="$2"; SIZE_EXPLICIT=1; shift 2 ;;
+        --threshold) THRESHOLD="$2"; shift 2 ;;
+        --port)  PORT="$2"; PORT_EXPLICIT=1; shift 2 ;;
+        --) shift; break ;;
+        -h|--help)
+            echo "usage: kronos [--parts [N] | --size CHUNK] [--threshold SIZE] [--port PORT] user@host:/abs/remote/path [local_dest_dir]"
+            exit 0
+            ;;
+        -*)
+            echo "usage: kronos [--parts [N] | --size CHUNK] [--threshold SIZE] [--port PORT] user@host:/abs/remote/path [local_dest_dir]" >&2
+            exit 1
+            ;;
+        *) break ;;
+    esac
+done
+
+if [ "$#" -lt 1 ]; then
+    echo "usage: kronos [--parts [N] | --size CHUNK] [--threshold SIZE] [--port PORT] user@host:/abs/remote/path [local_dest_dir]" >&2
+    exit 1
+fi
+
+REMOTE_SPEC="$1"
+DEST_DIR="${2:-$HOME/Downloads}"
+mkdir -p "$DEST_DIR"
+
+if [ "$PORT_EXPLICIT" -eq 0 ]; then
+    printf "%s[WARN]%s no --port specified; defaulting to port 22\n" "$YELLOW" "$NC"
+fi
+
+if [[ "$REMOTE_SPEC" != *:* ]]; then
+    echo "remote must be user@host:/abs/remote/path" >&2
+    exit 1
+fi
+USER_HOST="${REMOTE_SPEC%%:*}"
+SRC="${REMOTE_SPEC#*:}"
+if [[ "$USER_HOST" != *@* ]]; then
+    echo "remote must be user@host:/abs/remote/path" >&2
+    exit 1
+fi
+REMOTE_USER="${USER_HOST%@*}"
+REMOTE_HOST="${USER_HOST#*@}"
+
+is_dir=$(ssh -p "${PORT}" "${REMOTE_USER}@${REMOTE_HOST}" "bash -lc 'if [ -d \"${SRC}\" ]; then echo 1; else echo 0; fi'")
+if [ "$is_dir" = "1" ]; then
+    rsync -avzP -e "ssh -p ${PORT}" "${REMOTE_USER}@${REMOTE_HOST}:\"${SRC%/}/\"" "$DEST_DIR/"
+    exit 0
+fi
+
+size_bytes=$(ssh -p "${PORT}" "${REMOTE_USER}@${REMOTE_HOST}" "bash -lc 'stat -c %s -- \"${SRC}\" 2>/dev/null || stat -f %z -- \"${SRC}\" 2>/dev/null'")
+
+parse_bytes() {
+    case "$1" in
+        *[Kk]) awk -v n="${1%[Kk]}" 'BEGIN{printf "%.0f", n*1024}' ;;
+        *[Mm]) awk -v n="${1%[Mm]}" 'BEGIN{printf "%.0f", n*1024*1024}' ;;
+        *[Gg]) awk -v n="${1%[Gg]}" 'BEGIN{printf "%.0f", n*1024*1024*1024}' ;;
+        *[Tt]) awk -v n="${1%[Tt]}" 'BEGIN{printf "%.0f", n*1024*1024*1024*1024}' ;;
+        *) echo "$1" ;;
+    esac
+}
+threshold_bytes=$(parse_bytes "$THRESHOLD")
+
+BASE="$(basename "$SRC")"
+STEM="${BASE%.*}"
+
+if [ -z "$PARTS" ]; then
+    PARTS="1"
+fi
+
+if [ "$PARTS" = "1" ]; then
+    if [ "$size_bytes" -ge "$threshold_bytes" ]; then
+        printf "%s[HINT]%s file exceeds threshold (%s); consider --parts N (e.g. 6–8) for parallel transfer. Continuing with rsync...\n" "$YELLOW" "$NC" "$THRESHOLD"
+    fi
+    rsync -avzP -e "ssh -p ${PORT}" "${REMOTE_USER}@${REMOTE_HOST}:\"${SRC}\"" "$DEST_DIR/"
+    exit 0
+fi
+
+if [ "$PARTS" -gt 8 ]; then
+    printf "%s[WARN]%s requested --parts %s; auto-adjusting to 8 equal parts (may avoid rate limiting)\n" "$YELLOW" "$NC" "$PARTS"
+    PARTS="8"
+fi
+
+if [ "$SIZE_EXPLICIT" -eq 0 ]; then
+    SIZE_MODE=""
+fi
+
+MODE_STR="parts_${PARTS}"
+ID_SRC="$(printf '%s' "$REMOTE_SPEC" | shasum | awk '{print $1}')"
+ID="$(printf '%s|%s' "$ID_SRC" "$MODE_STR" | shasum | awk '{print $1}')"
+
+REMOTE_PARTS_DIR="/tmp/kronos_${ID}_${STEM}"
+LOCAL_PARTS_DIR="${HOME}/.cache/kronos/${ID}"
+mkdir -p "$LOCAL_PARTS_DIR"
+
+if [ -n "$SIZE_MODE" ]; then
+    SPLIT_CMD="split -b \"${SIZE_MODE}\" -d -a 3 -- \"\${SRC}\" \"\${REMOTE_PARTS_DIR}/${BASE}.part.\""
+else
+    SPLIT_CMD="split -n ${PARTS} -d -a 3 -- \"\${SRC}\" \"\${REMOTE_PARTS_DIR}/${BASE}.part.\""
+fi
+
+ssh -p "${PORT}" "${REMOTE_USER}@${REMOTE_HOST}" "bash -lc 'set -euo pipefail
+SRC=\"${SRC}\"
+REMOTE_PARTS_DIR=\"${REMOTE_PARTS_DIR}\"
+BASE=\"${BASE}\"
+mkdir -p \"\${REMOTE_PARTS_DIR}\"
+if [ ! -f \"\${REMOTE_PARTS_DIR}/MANIFEST\" ] || [ ! -f \"\${REMOTE_PARTS_DIR}/SHA256SUM\" ]; then
+    sha256sum -- \"\${SRC}\" > \"\${REMOTE_PARTS_DIR}/SHA256SUM\"
+    rm -f \"\${REMOTE_PARTS_DIR}/\${BASE}.part.\"* 2>/dev/null || true
+    ${SPLIT_CMD}
+    ls -1 \"\${REMOTE_PARTS_DIR}/\${BASE}.part.\"* | LC_ALL=C sort > \"\${REMOTE_PARTS_DIR}/MANIFEST\"
+fi'"
+
+RCLONE_SRC=":sftp,host=${REMOTE_HOST},port=${PORT},user=${REMOTE_USER}:${REMOTE_PARTS_DIR}/"
+
+rclone copy "$RCLONE_SRC" "${LOCAL_PARTS_DIR}/" \
+    --ignore-existing \
+    --transfers="${TRANSFERS}" \
+    --checkers="${CHECKERS}" \
+    --progress
+
+OUTFILE="${DEST_DIR}/${BASE}"
+rm -f "${OUTFILE}"
+LC_ALL=C sort "${LOCAL_PARTS_DIR}/MANIFEST" > "${LOCAL_PARTS_DIR}/MANIFEST.sorted"
+while IFS= read -r p; do
+    part_name="$(basename "$p")"
+    cat "${LOCAL_PARTS_DIR}/${part_name}" >> "${OUTFILE}"
+done < "${LOCAL_PARTS_DIR}/MANIFEST.sorted"
+
+REMOTE_HASH="$(awk '{print $1}' "${LOCAL_PARTS_DIR}/SHA256SUM")"
+LOCAL_HASH="$(shasum -a 256 -- "${OUTFILE}" | awk '{print $1}')"
+
+if [ "${REMOTE_HASH}" != "${LOCAL_HASH}" ]; then
+    printf "%s[WARN]%s hash mismatch: remote %s != local %s\n" "$YELLOW" "$NC" "$REMOTE_HASH" "$LOCAL_HASH" >&2
+    echo "parts kept for resume: remote ${REMOTE_PARTS_DIR}, local ${LOCAL_PARTS_DIR}" >&2
+    exit 2
+fi
+
+ssh -p "${PORT}" "${REMOTE_USER}@${REMOTE_HOST}" "rm -rf -- \"${REMOTE_PARTS_DIR}\""
+rm -rf -- "${LOCAL_PARTS_DIR}"
+
+FILE_SIZE=$(du -h "$OUTFILE" | cut -f1)
+echo "Transfer complete: ${OUTFILE} (SHA256 verified, size ${FILE_SIZE})"
