@@ -1,46 +1,84 @@
 # Kronos
 
-Kronos is a smarter file transfer wrapper that unifies `rsync`, `rclone`, and related Unix tools under a single command. It provides safe defaults, automatic mode selection, and integrity checks to make moving files over SSH reliable and efficient.
+Kronos is a smarter file transfer wrapper that unifies `rsync`, `rclone`, and standard Unix tools under a single command. It chooses safe defaults, automatically selects the right strategy for the job, and verifies data integrity. The goal is to make moving files over SSH reliable, efficient, and simple.
 
 ## Overview
 
-Traditional tools such as `scp`, `rsync`, and `rclone` are powerful but require manual decision-making and detailed flags. Kronos removes that friction:
+Existing tools like `scp`, `rsync`, and `rclone` are powerful, but each has trade-offs. Kronos removes the guesswork:
 
-- Small files and directories are transferred directly with `rsync`.
-- Large single files are split into parts and fetched in parallel using `rclone` over SFTP.
-- All transfers are verified against SHA-256 checksums for data integrity.
-- Resume is supported: already-downloaded parts are skipped on re-run.
-- Temporary parts are automatically cleaned up after a successful transfer.
+- **Small files and directories** → transferred directly with `rsync`.
+- **Large single files** → split into parts and fetched in parallel with `rclone` over SFTP.
+- **Integrity** → every transfer is verified with SHA-256.
+- **Resume support** → already downloaded parts are skipped automatically.
+- **Cleanup** → temporary parts are removed after a verified transfer.
 
-Kronos is designed to be predictable and transparent. It chooses the right strategy based on file size and user options, while giving clear warnings about thresholds, ports, and part counts.
+Kronos is predictable and transparent: it warns about thresholds, ports, and part counts, while leaving you in control.
 
-## Key Features
+## Features
 
-- **Automatic mode selection**  
-  - `rsync` for directories and small files.  
-  - Split and parallel transfer for large files.  
+- **Automatic mode selection**
+  - Uses `rsync` for small files and directories.
+  - Switches to parallel split mode for large files.
 
-- **Parallel transfers**  
-  - User-selectable number of parts (`--parts N`).  
-  - Size-based chunking (`--size CHUNK`).  
+- **Parallel transfers**
+  - Select part count with `--parts N`.
+  - Or chunk by size with `--size CHUNK`.
+  - `--parts` without a number defaults to 8 equal parts.
 
-- **Safe defaults**  
-  - Default port 22 (with a warning if unspecified).  
-  - Default to 1 part (rsync).  
-  - `--parts` without a number defaults to 8 equal parts.  
+- **Safe defaults**
+  - Defaults to port 22 (warns if unspecified).
+  - Defaults to 1 part (direct `rsync`).
 
-- **Integrity verification**  
-  - SHA-256 checksums ensure merged files match the original.  
+- **Integrity verification**
+  - SHA-256 ensures the merged file matches the source.
 
-- **Resumable and clean**  
-  - Skips completed parts.  
-  - Cleans up remote and local cache on success.  
+- **Resumable and clean**
+  - Skips completed parts.
+  - Removes temporary parts on success.
 
-## Why Kronos
+## Why Kronos?
 
-- **Simpler**: one command instead of remembering when to use `scp`, `rsync`, or `rclone`.  
-- **Safer**: checksum verification and resume support reduce the risk of silent corruption or wasted bandwidth.  
-- **Faster**: large files are transferred in parallel streams, often saturating available bandwidth better than single-stream tools.  
-- **Transparent**: clear warnings about thresholds, defaults, and potential rate limiting.  
+- **Simpler**: one interface instead of juggling `scp`, `rsync`, and `rclone`.  
+- **Safer**: checksum verification and resume support reduce risk of corruption and wasted bandwidth.  
+- **Faster**: parallel mode can saturate network bandwidth better than single-stream transfers.  
+- **Transparent**: prints clear hints and warnings so you know what it’s doing.
 
-Kronos does not replace `rsync` or `rclone` but builds on them, offering a unified interface that covers common use cases with less effort and fewer mistakes.
+## Installation
+
+On Arch Linux:
+
+```bash
+yay -S kronos-cli-git
+```
+
+Or clone the repo and run the script directly:
+
+```bash
+git clone https://github.com/stella-etoile/kronos
+cd kronos
+./kronos --help
+```
+
+## Usage
+
+Basic transfer:
+
+```bash
+kronos user@host:/remote/path/file.txt ~/Downloads
+```
+
+Split into 6 parts:
+
+```bash
+kronos --parts 6 user@host:/remote/path/bigfile.mkv ~/Downloads
+```
+
+Transfer with chunk size:
+
+```bash
+kronos --size 500M user@host:/remote/path/bigfile.iso ~/Downloads
+```
+
+## License
+
+MIT — see [LICENSE](LICENSE).
